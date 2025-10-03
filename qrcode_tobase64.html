@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <title>QR → Base64 Decode</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;display:flex;flex-direction:column;align-items:center;padding:20px}
+    video{width:320px;height:240px;border:1px solid #ccc;background:#000}
+    canvas{display:none}
+    #output{width:100%;max-width:720px;margin-top:12px;padding:12px;border:1px solid #ddd;background:#fafafa}
+    button{margin:6px}
+    .ok{color:green}
+    .err{color:#c00}
+  </style>
+</head>
+<body>
+  <h1>QR → Base64 Decode</h1>
+  <p>Kamera ile okut veya resim yükle. QR içindeki string Base64 ise otomatik decode edilir.</p>
+
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+
+  <div>
+    <input type="file" id="fileInput" accept="image/*">
+    <button id="startBtn">Kamerayı Başlat</button>
+    <button id="stopBtn">Durdur</button>
+    <button id="copyBtn">Çözüleni Kopyala</button>
+  </div>
+
+  <div id="output">
+    <div><strong>Raw (QR):</strong> <span id="raw">—</span></div>
+    <div><strong>Base64 decode (text):</strong></div>
+    <pre id="decoded" style="white-space:pre-wrap;word-break:break-word">—</pre>
+    <div id="status"></div>
+  </div>
+
+  <!-- jsQR CDN -->
+  <script src="https://unpkg.com/jsqr/dist/jsQR.js"></script>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const rawEl = document.getElementById('raw');
+    const decodedEl = document.getElementById('decoded');
+    const statusEl = document.getElementById('status');
+    const fileInput = document.getElementById('fileInput');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const copyBtn = document.getElementById('copyBtn');
+
+    let stream = null;
+    let scanning = false;
+    let scanLoopId = null;
+
+    startBtn.onclick = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        video.srcObject = stream;
+        scanning = true;
+        status('Kamera açık — QR taranıyor...', 'ok');
+        startScanLoop();
+      } catch (e) {
+        status('Kamera açılamadı: ' + e.message, 'err');
+      }
+    };
+
+    stopBtn.onclick = () => {
+      stopScanning();
+    };
+
+    fileInput.onchange = (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      const img = new Image();
+      img.onload = () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img,0,0);
+        const imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        handleQRResult(code ? code.data : null);
+      };
+      img.onerror = () => status('Resim yüklenemedi', 'err');
+      img.src = URL.createObjectURL(f);
+    };
+
+    copyBtn.onclick = async () => {
+      const text = decodedEl.textContent;
+      if (!text || text === '—') return;
+      try {
+        await navigator.clipboard.writeText(text);
+        status('Kopyalandı ✓', 'ok');
+      } catch {
+        status('Kopyalama başarısız.', 'err');
+      }
+    };
+
+    function startScanLoop() {
+      if (scanLoopId) cancelAnimationFrame(scanLoopId);
+      canvas.width = video.videoWidth || 320;
+      canvas.height = video.videoHeight || 240;
+      const loop = () => {
+        if (!scanning) return;
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(imageData.data, imageData.width, imageData.height);
+          if (code) {
+            handleQRResult(code.data);
+          }
+        }
+        scanLoopId = requestAnimationFrame(loop);
+      };
+      loop();
+    }
+
+    function stopScanning() {
+      scanning = false;
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      if (scanLoopId) cancelAnimationFrame(scanLoopId);
+      status('Tarama durdu', '');
+    }
+
+    function handleQRResult(data) {
+      if (!data) {
+        status('QR bulunamadı', 'err');
+        return;
+      }
+      rawEl.textContent = data;
+      // Deneyeceğimiz decode yolları:
+      const trimmed = data.trim();
+      // Eğer içinde "data:...;base64," varsa ayır:
+      const base64Segment = (() => {
+        const m = trimmed.match(/base64,([A-Za-z0-9+/=]+)$/);
+        if (m) return m[1];
+        return trimmed;
+      })();
+
+      try {
+        const decoded = base64ToUtf8(base64Segment);
+        decodedEl.textContent = decoded;
+        status('Başarılı: Base64 çözüldü', 'ok');
+      } catch (e) {
+        // atob/decoder hatası
+        decodedEl.textContent = '[Base64 decode başarısız] — raw base64: ' + base64Segment;
+        status('Base64 çözülemedi: ' + e.message, 'err');
+      }
+      // Dilersen taramayı durdur:
+      // stopScanning();
+    }
+
+    // Güvenli Base64 -> UTF-8 decode
+    function base64ToUtf8(b64) {
+      // atob ile binary string al
+      const binStr = atob(b64);
+      // charCode -> Uint8Array
+      const len = binStr.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
+      // UTF-8 decode
+      const td = new TextDecoder('utf-8');
+      return td.decode(bytes);
+    }
+
+    function status(msg, cls) {
+      statusEl.textContent = msg;
+      statusEl.className = cls;
+    }
+
+    // sayfa kapanırken kamerayı kapat
+    window.addEventListener('beforeunload', stopScanning);
+  </script>
+</body>
+</html>
